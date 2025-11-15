@@ -1,0 +1,9 @@
+numpy==1.26.4
+pandas==2.2.0
+umap-learn==0.5.5
+scikit-learn==1.4.0
+plotly==5.18.0
+dash==2.14.2
+dash-bootstrap-components==1.5.0
+pillow==10.2.0
+pylint==3.0.3
