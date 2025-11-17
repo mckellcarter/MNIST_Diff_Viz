@@ -4,18 +4,19 @@ Converts Bokeh-based visualization to Plotly for interactive exploration
 of MNIST diffusion network activations
 """
 
+import base64
+import os
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import umap
 from sklearn.manifold import TSNE
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Dash, dcc, html, Input, Output, State, callback_context
+from dash import Dash, dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 from PIL import Image
-import base64
-from io import BytesIO
-import os
 
 # Set random seed for reproducibility
 np.random.seed(8675309)
@@ -24,8 +25,8 @@ np.random.seed(8675309)
 def normalize_layout(layout, min_percentile=1, max_percentile=99, relative_margin=0.1):
     """Removes outliers and scales layout to between [0,1]."""
     # Compute percentiles
-    mins = np.percentile(layout, min_percentile, axis=(0))
-    maxs = np.percentile(layout, max_percentile, axis=(0))
+    mins = np.percentile(layout, min_percentile, axis=0)
+    maxs = np.percentile(layout, max_percentile, axis=0)
 
     # Add margins
     mins -= relative_margin * (maxs - mins)
@@ -51,7 +52,7 @@ def encode_image_to_base64(image_path):
             img.save(buffer, format='PNG')
             img_str = base64.b64encode(buffer.getvalue()).decode()
             return f'data:image/png;base64,{img_str}'
-    except Exception as e:
+    except (FileNotFoundError, IOError) as e:
         print(f"Error loading image {image_path}: {e}")
         return None
 
@@ -195,7 +196,7 @@ def toggle_controls(method):
     """Show/hide controls based on selected method."""
     if method == 'UMAP':
         return {'display': 'block'}, {'display': 'none'}
-    elif method == 'TSNE':
+    if method == 'TSNE':
         return {'display': 'none'}, {'display': 'block'}
     return {'display': 'block'}, {'display': 'none'}
 
@@ -213,6 +214,7 @@ def toggle_controls(method):
     prevent_initial_call=False
 )
 def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_rate, layer):
+    # pylint: disable=unused-argument
     """Update UMAP plot based on selected parameters."""
 
     status = f"Computing {method} with n_neighbors={n_neighbors}, min_dist={min_dist}..."
@@ -243,6 +245,8 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
             random_state=8675309,
             verbose=1
         ).fit_transform(activ)
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
     # Normalize layout
     layout = normalize_layout(layout)
@@ -279,11 +283,7 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
         x=x_coords,
         y=y_coords,
         mode='markers',
-        marker=dict(
-            size=5,
-            color=target_colors,
-            line=dict(width=0)
-        ),
+        marker={'size': 5, 'color': target_colors, 'line': {'width': 0}},
         text=hover_text,
         hovertemplate='%{text}',
         customdata=np.column_stack((image_paths, targets,
@@ -296,7 +296,7 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
             x=[None],
             y=[None],
             mode='markers',
-            marker=dict(size=8, color=colors[i]),
+            marker={'size': 8, 'color': colors[i]},
             showlegend=True,
             name=f'Class {i}'
         ))
@@ -309,8 +309,8 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
         hovermode='closest',
         plot_bgcolor='white',
         height=800,
-        xaxis=dict(gridcolor='lightgray'),
-        yaxis=dict(gridcolor='lightgray')
+        xaxis={'gridcolor': 'lightgray'},
+        yaxis={'gridcolor': 'lightgray'}
     )
 
     status = f"Visualization complete: {layout.shape[0]} points plotted"
@@ -359,7 +359,7 @@ def display_hover_image(hover_data):
             ], className="mb-0 small")
         ])
 
-    except Exception as e:
+    except (KeyError, IndexError, FileNotFoundError, IOError) as e:
         return html.Div(f"Error: {str(e)}", className="text-danger")
 
 
