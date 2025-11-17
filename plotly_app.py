@@ -12,9 +12,11 @@ import numpy as np
 import pandas as pd
 import umap
 from sklearn.manifold import TSNE
+from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State, Patch
+from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from PIL import Image
 
@@ -66,6 +68,12 @@ print(f"Outputs shape: {outputs.shape}")
 
 # Create layout
 app.layout = dbc.Container([
+    # Hidden stores for state management
+    dcc.Store(id='selected-point-store', data=None),
+    dcc.Store(id='neighbor-indices-store', data=None),
+    dcc.Store(id='activation-data-store', data=None),
+    dcc.Store(id='layout-data-store', data=None),
+
     dbc.Row([
         dbc.Col([
             html.H2("MNIST UMAP Visualization", className="text-center mb-4"),
@@ -166,6 +174,70 @@ app.layout = dbc.Container([
                     html.H6("Hover Info", className="card-subtitle mb-2"),
                     html.Div(id='hover-info', className="p-2 border rounded")
                 ])
+            ], className="mb-3"),
+
+            # Selection panel
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                        html.H5("Selection", className="card-title d-inline"),
+                        dbc.Button(
+                            "✕",
+                            id='clear-selection-button',
+                            color="link",
+                            size="sm",
+                            className="float-end p-0",
+                            style={'fontSize': '20px', 'lineHeight': '1', 'display': 'none'}
+                        ),
+                    ], className="mb-2"),
+                    html.Div(id='selection-info', children=[
+                        html.Div("Click a point to select", className="text-muted")
+                    ], className="p-2 border rounded mb-3"),
+
+                    html.Hr(className="my-3"),
+
+                    html.H6("Neighbor Selection", className="card-subtitle mb-2"),
+
+                    html.Label("Method"),
+                    dcc.Dropdown(
+                        id='neighbor-method-select',
+                        options=[
+                            {'label': 'K-Nearest Neighbors', 'value': 'KNN'}
+                        ],
+                        value='KNN',
+                        className="mb-3",
+                        disabled=True
+                    ),
+
+                    html.Div(id='knn-controls', children=[
+                        html.Label("K (Number of Neighbors)"),
+                        dcc.Slider(
+                            id='k-neighbors-slider',
+                            min=1,
+                            max=100,
+                            step=1,
+                            value=25,
+                            marks={i: str(i) for i in [1, 25, 50, 75, 100]},
+                            tooltip={"placement": "bottom", "always_visible": True},
+                            className="mb-3",
+                            disabled=True
+                        ),
+                    ]),
+
+                    dbc.Button(
+                        "Find Neighbors",
+                        id='find-neighbors-button',
+                        color="primary",
+                        className="w-100 mb-3",
+                        disabled=True
+                    ),
+
+                    html.H6("Neighbors Found", className="card-subtitle mb-2"),
+                    html.Div(id='neighbor-list', children=[
+                        html.Div("No neighbors found", className="text-muted")
+                    ], className="p-2 border rounded",
+                    style={'maxHeight': '300px', 'overflowY': 'auto'})
+                ])
             ], className="h-100")
         ], width=3),
 
@@ -203,18 +275,24 @@ def toggle_controls(method):
 
 @app.callback(
     [Output('umap-plot', 'figure'),
-     Output('status-message', 'children')],
+     Output('status-message', 'children'),
+     Output('activation-data-store', 'data'),
+     Output('layout-data-store', 'data')],
     [Input('update-button', 'n_clicks')],
     [State('method-select', 'value'),
      State('n-neighbors-slider', 'value'),
      State('min-dist-slider', 'value'),
      State('perplexity-slider', 'value'),
      State('learning-rate-slider', 'value'),
-     State('layer-select', 'value')],
+     State('layer-select', 'value'),
+     State('activation-data-store', 'data'),
+     State('layout-data-store', 'data')],
     prevent_initial_call=False
 )
-def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_rate, layer):
-    # pylint: disable=unused-argument
+def update_plot(n_clicks,
+                method, n_neighbors, min_dist, perplexity, learning_rate, layer,
+                stored_activ, stored_layout):
+    # pylint: disable=unused-argument,too-many-arguments,too-many-locals,too-many-statements
     """Update UMAP plot based on selected parameters."""
 
     status = f"Computing {method} with n_neighbors={n_neighbors}, min_dist={min_dist}..."
@@ -224,32 +302,42 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
     print(f"Activation shape: {activ.shape}")
 
     # Drop index columns
-    activ.drop(activ.columns[[0, 1]], axis=1, inplace=True)
+    activ_clean = activ.drop(activ.columns[[0, 1]], axis=1)
 
-    # Compute dimensionality reduction layout
-    if method == "UMAP":
-        layout = umap.UMAP(
-            metric="cosine",
-            n_neighbors=n_neighbors,
-            min_dist=min_dist,
-            low_memory=False,
-            random_state=8675309,
-            verbose=True
-        ).fit_transform(activ)
-    elif method == "TSNE":
-        layout = TSNE(
-            n_components=2,
-            metric="cosine",
-            learning_rate=learning_rate,
-            perplexity=min(perplexity, len(activ) - 1),
-            random_state=8675309,
-            verbose=1
-        ).fit_transform(activ)
+    # Compute layout (recompute every time or use stored if available for optimization later)
+    if stored_layout is None:
+        # Compute dimensionality reduction layout
+        if method == "UMAP":
+            layout = umap.UMAP(
+                metric="cosine",
+                n_neighbors=n_neighbors,
+                min_dist=min_dist,
+                low_memory=False,
+                random_state=8675309,
+                verbose=True
+            ).fit_transform(activ_clean)
+        elif method == "TSNE":
+            layout = TSNE(
+                n_components=2,
+                metric="cosine",
+                learning_rate=learning_rate,
+                perplexity=min(perplexity, len(activ_clean) - 1),
+                random_state=8675309,
+                verbose=1
+            ).fit_transform(activ_clean)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # Normalize layout
+        layout = normalize_layout(layout)
+        layout_dict = {'x': layout[:, 0].tolist(), 'y': layout[:, 1].tolist()}
     else:
-        raise ValueError(f"Unknown method: {method}")
+        # Use stored layout
+        layout_dict = stored_layout
+        layout = np.column_stack((layout_dict['x'], layout_dict['y']))
 
-    # Normalize layout
-    layout = normalize_layout(layout)
+    # Store activation data for KNN computation
+    activ_dict = activ_clean.values.tolist()
 
     # Prepare data for plotting
     x_coords = layout[:, 0]
@@ -315,7 +403,269 @@ def update_plot(n_clicks, method, n_neighbors, min_dist, perplexity, learning_ra
 
     status = f"Visualization complete: {layout.shape[0]} points plotted"
 
-    return fig, status
+    return fig, status, activ_dict, layout_dict
+
+
+@app.callback(
+    Output('umap-plot', 'figure', allow_duplicate=True),
+    [Input('selected-point-store', 'data'),
+     Input('neighbor-indices-store', 'data'),
+     Input('layout-data-store', 'data')],
+    [State('umap-plot', 'figure')],
+    prevent_initial_call=True
+)
+def update_plot_highlighting(selected_point, neighbor_indices, layout_data, current_figure):
+    """Update plot to highlight selected point and neighbors."""
+    # Don't update if no layout data or no figure exists yet
+    if layout_data is None or current_figure is None:
+        raise PreventUpdate
+
+    n_points = len(layout_data['x'])
+
+    # Create patch to update only marker properties
+    patched_figure = Patch()
+
+    # Prepare marker styling based on selection and neighbors
+    marker_sizes = [5] * n_points
+    marker_line_widths = [0] * n_points
+    marker_line_colors = ['rgba(0,0,0,0)'] * n_points
+    marker_opacities = [1.0] * n_points
+
+    # Highlight selected point
+    if selected_point is not None:
+        idx = selected_point.get('idx')
+        if idx is not None and 0 <= idx < n_points:
+            marker_sizes[idx] = 15
+            marker_line_widths[idx] = 3
+            marker_line_colors[idx] = 'black'
+            # Fade non-selected/non-neighbor points
+            marker_opacities = [0.3] * n_points
+            marker_opacities[idx] = 1.0
+
+    # Highlight neighbors
+    if neighbor_indices is not None and isinstance(neighbor_indices, list):
+        for n_idx in neighbor_indices:
+            if 0 <= n_idx < n_points:
+                marker_sizes[n_idx] = 7
+                marker_line_widths[n_idx] = 2
+                marker_line_colors[n_idx] = 'black'
+                marker_opacities[n_idx] = 1.0
+
+    # Update the first trace (main scatter plot)
+    patched_figure['data'][0]['marker']['size'] = marker_sizes
+    patched_figure['data'][0]['marker']['opacity'] = marker_opacities
+    patched_figure['data'][0]['marker']['line'] = {
+        'width': marker_line_widths,
+        'color': marker_line_colors
+    }
+
+    return patched_figure
+
+
+@app.callback(
+    [Output('selected-point-store', 'data'),
+     Output('neighbor-method-select', 'disabled'),
+     Output('k-neighbors-slider', 'disabled'),
+     Output('find-neighbors-button', 'disabled'),
+     Output('clear-selection-button', 'style'),
+     Output('neighbor-indices-store', 'data', allow_duplicate=True)],
+    [Input('umap-plot', 'clickData'),
+     Input('clear-selection-button', 'n_clicks')],
+    prevent_initial_call=True
+)
+def select_point(click_data, clear_clicks):
+    """Handle point selection on click and deselection on clear button."""
+    # pylint: disable=unused-argument
+    from dash import callback_context
+    ctx = callback_context
+
+    # Check which input triggered the callback
+    if not ctx.triggered:
+        clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'none'}
+        return None, True, True, True, clear_button_style, None
+
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # Clear button was clicked - clear selection and neighbors
+    if trigger_id == 'clear-selection-button':
+        clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'none'}
+        return None, True, True, True, clear_button_style, None
+
+    # Point was clicked
+    if click_data is None:
+        clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'none'}
+        return None, True, True, True, clear_button_style, None
+
+    try:
+        point = click_data['points'][0]
+        idx = int(point['customdata'][2])
+        x = point['x']
+        y = point['y']
+        target = point['customdata'][1]
+
+        selected_data = {
+            'idx': idx,
+            'x': float(x),
+            'y': float(y),
+            'target': int(float(target))  # Convert via float first to handle '4.0' format
+        }
+
+        # Enable neighbor controls and show clear button when a point is selected
+        # Clear neighbors when selecting a new point
+        clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'block'}
+        return selected_data, False, False, False, clear_button_style, None
+
+    except (KeyError, IndexError, ValueError) as e:
+        print(f"Error selecting point: {e}")
+        clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'none'}
+        return None, True, True, True, clear_button_style, None
+
+
+@app.callback(
+    Output('selection-info', 'children'),
+    Input('selected-point-store', 'data')
+)
+def display_selection_info(selected_point):
+    """Display selected point info."""
+    if selected_point is None:
+        return html.Div("Click a point to select", className="text-muted")
+
+    try:
+        idx = selected_point['idx']
+        x = selected_point['x']
+        y = selected_point['y']
+        target = selected_point['target']
+
+        image_path = f'visualize/static/images/MNIST_train_images/train{idx:0>5}.png'
+
+        # Load and encode image
+        if os.path.exists(image_path):
+            with Image.open(image_path) as img:
+                img.thumbnail((120, 120))
+                buffer = BytesIO()
+                img.save(buffer, format='PNG')
+                img_str = base64.b64encode(buffer.getvalue()).decode()
+                img_data = f'data:image/png;base64,{img_str}'
+        else:
+            img_data = None
+
+        return html.Div([
+            html.Img(src=img_data, style={'width': '120px', 'height': '120px'})
+            if img_data else html.Div("Image not found"),
+            html.Hr(className="my-2"),
+            html.P([
+                html.Strong("Class: "), f"{target}", html.Br(),
+                html.Strong("X: "), f"{x:.4f}", html.Br(),
+                html.Strong("Y: "), f"{y:.4f}", html.Br(),
+                html.Strong("File: "), f"train{idx:0>5}.png"
+            ], className="mb-0 small")
+        ])
+
+    except (KeyError, FileNotFoundError, IOError) as e:
+        return html.Div(f"Error: {str(e)}", className="text-danger")
+
+
+@app.callback(
+    Output('neighbor-indices-store', 'data'),
+    [Input('find-neighbors-button', 'n_clicks')],
+    [State('selected-point-store', 'data'),
+     State('k-neighbors-slider', 'value'),
+     State('layout-data-store', 'data')]
+)
+def find_neighbors(n_clicks, selected_point, k_value, layout_data):
+    """Compute K-nearest neighbors for selected point."""
+    if n_clicks is None or selected_point is None or layout_data is None:
+        return None
+
+    try:
+        idx = selected_point['idx']
+
+        # Convert stored layout data (2D UMAP/t-SNE coordinates) to numpy array
+        layout_array = np.column_stack((layout_data['x'], layout_data['y']))
+
+        # Compute KNN on 2D projection
+        knn = NearestNeighbors(n_neighbors=k_value + 1, metric='euclidean')
+        knn.fit(layout_array)
+
+        # Find neighbors (k+1 because the point itself is included)
+        _, indices = knn.kneighbors([layout_array[idx]])
+
+        # Remove the point itself (first result)
+        neighbor_indices = indices[0][1:].tolist()
+
+        return neighbor_indices
+
+    except (KeyError, IndexError, ValueError) as e:
+        print(f"Error finding neighbors: {e}")
+        return None
+
+
+@app.callback(
+    Output('neighbor-list', 'children'),
+    [Input('neighbor-indices-store', 'data')],
+    [State('layout-data-store', 'data')]
+)
+def display_neighbor_list(neighbor_indices, layout_data):
+    """Display list of neighbors with images and info."""
+    if neighbor_indices is None or not neighbor_indices:
+        return html.Div("No neighbors found", className="text-muted")
+
+    try:
+        neighbor_items = []
+
+        # Header showing count
+        neighbor_items.append(
+            html.Div([
+                html.Strong(f"{len(neighbor_indices)} Neighbors"),
+            ], className="mb-2")
+        )
+
+        # Create list of neighbor items
+        for i, n_idx in enumerate(neighbor_indices):
+            target = int(outputs["Target"].iloc[n_idx])
+            image_path = f'visualize/static/images/MNIST_train_images/train{n_idx:0>5}.png'
+
+            # Load and encode image
+            if os.path.exists(image_path):
+                with Image.open(image_path) as img:
+                    img.thumbnail((60, 60))
+                    buffer = BytesIO()
+                    img.save(buffer, format='PNG')
+                    img_str = base64.b64encode(buffer.getvalue()).decode()
+                    img_data = f'data:image/png;base64,{img_str}'
+            else:
+                img_data = None
+
+            # Get coordinates from layout
+            x_coord = layout_data['x'][n_idx] if layout_data else 0
+            y_coord = layout_data['y'][n_idx] if layout_data else 0
+
+            # Create neighbor card
+            neighbor_items.append(
+                html.Div([
+                    dbc.Row([
+                        dbc.Col([
+                            html.Img(src=img_data, style={'width': '60px', 'height': '60px'})
+                            if img_data else html.Div("No image", className="text-muted")
+                        ], width=4),
+                        dbc.Col([
+                            html.P([
+                                html.Strong(f"Neighbor {i+1}"), html.Br(),
+                                f"Class: {target}", html.Br(),
+                                f"X: {x_coord:.4f}", html.Br(),
+                                f"Y: {y_coord:.4f}", html.Br(),
+                                f"Index: {n_idx}"
+                            ], className="mb-0 small")
+                        ], width=8)
+                    ], className="align-items-center"),
+                    html.Hr(className="my-2") if i < len(neighbor_indices) - 1 else None
+                ], className="mb-2")
+            )
+
+        return html.Div(neighbor_items)
+
+    except (KeyError, IndexError, FileNotFoundError, IOError) as e:
+        return html.Div(f"Error: {str(e)}", className="text-danger")
 
 
 @app.callback(

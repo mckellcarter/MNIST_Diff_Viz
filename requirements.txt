@@ -7,3 +7,4 @@ dash==2.14.2
 dash-bootstrap-components==1.5.0
 pillow==10.2.0
 pylint==3.0.3
+pyarrow==14.0.1
