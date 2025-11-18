@@ -5,6 +5,7 @@ of MNIST diffusion network activations
 """
 
 import base64
+import json
 import os
 from io import BytesIO
 
@@ -15,7 +16,7 @@ from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
 import plotly.express as px
-from dash import Dash, dcc, html, Input, Output, State, Patch
+from dash import Dash, dcc, html, Input, Output, State, Patch, ALL, callback_context
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 from PIL import Image
@@ -304,37 +305,31 @@ def update_plot(n_clicks,
     # Drop index columns
     activ_clean = activ.drop(activ.columns[[0, 1]], axis=1)
 
-    # Compute layout (recompute every time or use stored if available for optimization later)
-    if stored_layout is None:
-        # Compute dimensionality reduction layout
-        if method == "UMAP":
-            layout = umap.UMAP(
-                metric="cosine",
-                n_neighbors=n_neighbors,
-                min_dist=min_dist,
-                low_memory=False,
-                random_state=8675309,
-                verbose=True
-            ).fit_transform(activ_clean)
-        elif method == "TSNE":
-            layout = TSNE(
-                n_components=2,
-                metric="cosine",
-                learning_rate=learning_rate,
-                perplexity=min(perplexity, len(activ_clean) - 1),
-                random_state=8675309,
-                verbose=1
-            ).fit_transform(activ_clean)
-        else:
-            raise ValueError(f"Unknown method: {method}")
-
-        # Normalize layout
-        layout = normalize_layout(layout)
-        layout_dict = {'x': layout[:, 0].tolist(), 'y': layout[:, 1].tolist()}
+    # Compute dimensionality reduction layout (always recalculate on update)
+    if method == "UMAP":
+        layout = umap.UMAP(
+            metric="cosine",
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            low_memory=False,
+            random_state=8675309,
+            verbose=True
+        ).fit_transform(activ_clean)
+    elif method == "TSNE":
+        layout = TSNE(
+            n_components=2,
+            metric="cosine",
+            learning_rate=learning_rate,
+            perplexity=min(perplexity, len(activ_clean) - 1),
+            random_state=8675309,
+            verbose=1
+        ).fit_transform(activ_clean)
     else:
-        # Use stored layout
-        layout_dict = stored_layout
-        layout = np.column_stack((layout_dict['x'], layout_dict['y']))
+        raise ValueError(f"Unknown method: {method}")
+
+    # Normalize layout
+    layout = normalize_layout(layout)
+    layout_dict = {'x': layout[:, 0].tolist(), 'y': layout[:, 1].tolist()}
 
     # Store activation data for KNN computation
     activ_dict = activ_clean.values.tolist()
@@ -471,12 +466,13 @@ def update_plot_highlighting(selected_point, neighbor_indices, layout_data, curr
      Output('neighbor-indices-store', 'data', allow_duplicate=True)],
     [Input('umap-plot', 'clickData'),
      Input('clear-selection-button', 'n_clicks')],
+    [State('selected-point-store', 'data'),
+     State('neighbor-indices-store', 'data')],
     prevent_initial_call=True
 )
-def select_point(click_data, clear_clicks):
+def select_point(click_data, clear_clicks, selected_point, neighbor_indices):
     """Handle point selection on click and deselection on clear button."""
-    # pylint: disable=unused-argument
-    from dash import callback_context
+    # pylint: disable=unused-argument,too-many-return-statements,too-many-locals
     ctx = callback_context
 
     # Check which input triggered the callback
@@ -503,17 +499,31 @@ def select_point(click_data, clear_clicks):
         y = point['y']
         target = point['customdata'][1]
 
-        selected_data = {
-            'idx': idx,
-            'x': float(x),
-            'y': float(y),
-            'target': int(float(target))  # Convert via float first to handle '4.0' format
-        }
+        # If no point is selected yet, select this one and clear neighbors
+        if selected_point is None:
+            selected_data = {
+                'idx': idx,
+                'x': float(x),
+                'y': float(y),
+                'target': int(float(target))
+            }
+            clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'block'}
+            return selected_data, False, False, False, clear_button_style, None
 
-        # Enable neighbor controls and show clear button when a point is selected
-        # Clear neighbors when selecting a new point
+        # If a point is already selected, toggle the clicked point as a neighbor
+        # Initialize neighbor list if needed
+        if neighbor_indices is None:
+            neighbor_indices = []
+
+        # Toggle neighbor: remove if present, add if not
+        if idx in neighbor_indices:
+            updated_neighbors = [n for n in neighbor_indices if n != idx]
+        else:
+            updated_neighbors = neighbor_indices + [idx]
+
+        # Keep existing selection and update neighbors
         clear_button_style = {'fontSize': '20px', 'lineHeight': '1', 'display': 'block'}
-        return selected_data, False, False, False, clear_button_style, None
+        return selected_point, False, False, False, clear_button_style, updated_neighbors
 
     except (KeyError, IndexError, ValueError) as e:
         print(f"Error selecting point: {e}")
@@ -656,7 +666,17 @@ def display_neighbor_list(neighbor_indices, layout_data):
                                 f"Y: {y_coord:.4f}", html.Br(),
                                 f"Index: {n_idx}"
                             ], className="mb-0 small")
-                        ], width=8)
+                        ], width=7),
+                        dbc.Col([
+                            dbc.Button(
+                                "\u2715",
+                                id={'type': 'remove-neighbor-button', 'index': n_idx},
+                                color="link",
+                                size="sm",
+                                className="p-0",
+                                style={'fontSize': '20px', 'lineHeight': '1', 'color': '#dc3545'}
+                            )
+                        ], width=1, className="text-end")
                     ], className="align-items-center"),
                     html.Hr(className="my-2") if i < len(neighbor_indices) - 1 else None
                 ], className="mb-2")
@@ -666,6 +686,41 @@ def display_neighbor_list(neighbor_indices, layout_data):
 
     except (KeyError, IndexError, FileNotFoundError, IOError) as e:
         return html.Div(f"Error: {str(e)}", className="text-danger")
+
+
+@app.callback(
+    Output('neighbor-indices-store', 'data', allow_duplicate=True),
+    Input({'type': 'remove-neighbor-button', 'index': ALL}, 'n_clicks'),
+    [State('neighbor-indices-store', 'data')],
+    prevent_initial_call=True
+)
+def remove_neighbor(n_clicks, neighbor_indices):
+    """Remove a specific neighbor from the list."""
+    # pylint: disable=unused-argument
+    ctx = callback_context
+
+    if not ctx.triggered or neighbor_indices is None:
+        raise PreventUpdate
+
+    # Find which button was clicked
+    triggered_id = ctx.triggered[0]['prop_id']
+    if triggered_id == '.':
+        raise PreventUpdate
+
+    # Check if the triggered button actually has a value (was actually clicked)
+    triggered_value = ctx.triggered[0].get('value')
+    if triggered_value is None:
+        raise PreventUpdate
+
+    # Parse the button ID to get the index
+    button_id_str = triggered_id.split('.')[0]
+    button_id = json.loads(button_id_str)
+    idx_to_remove = button_id['index']
+
+    # Remove the neighbor from the list
+    updated_neighbors = [idx for idx in neighbor_indices if idx != idx_to_remove]
+
+    return updated_neighbors
 
 
 @app.callback(
