@@ -12,7 +12,7 @@ Interactive Plotly/Dash implementation with enhanced features:
 - Class-based color coding
 
 ### Bokeh Version (Original)
-Original implementation based on FairFace visualization from Rahul Kumar (https://github.com/SNaGLab/Fairface).
+Original implementation based on FairFace visualization ( https://github.com/SNaGLab/Fairface ) from Rahul Kumar ( https://github.com/rahulkumarm ).
 
 ## Setup
 
