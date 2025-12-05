@@ -34,10 +34,6 @@ python plotly_app.py
 ```
 Access at http://localhost:8050
 
-### Bokeh Version
-```bash
-bokeh serve visualize --show --port <portNumber>
-```
 
 ## Features
 
